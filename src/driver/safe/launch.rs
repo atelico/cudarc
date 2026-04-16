@@ -70,6 +70,20 @@ impl CudaStream {
             flags: None,
         }
     }
+
+    /// Fast-path builder that skips event tracking overhead.
+    /// For hot-path single-device inference where context is already current.
+    #[inline(always)]
+    pub fn launch_builder_fast<'a>(&'a self, func: &'a CudaFunction) -> LaunchArgs<'a> {
+        LaunchArgs {
+            stream: self,
+            func,
+            waits: Vec::new(),
+            records: Vec::new(),
+            args: Vec::new(),
+            flags: None,
+        }
+    }
 }
 
 /// Something that can be copied to device memory and

@@ -841,12 +841,15 @@ impl CudaStream {
 /// This object is thread safe.
 #[derive(Debug)]
 pub struct CudaSlice<T> {
-    pub(crate) cu_device_ptr: sys::CUdeviceptr,
-    pub(crate) len: usize,
-    pub(crate) read: Option<CudaEvent>,
-    pub(crate) write: Option<CudaEvent>,
-    pub(crate) stream: Arc<CudaStream>,
-    pub(crate) marker: PhantomData<*const T>,
+    pub cu_device_ptr: sys::CUdeviceptr,
+    pub len: usize,
+    pub read: Option<CudaEvent>,
+    pub write: Option<CudaEvent>,
+    pub stream: Arc<CudaStream>,
+    pub marker: PhantomData<*const T>,
+    /// When true, drop does NOT free the underlying device memory.
+    /// Used for sub-slices of arena-allocated buffers.
+    pub non_owning: bool,
 }
 
 unsafe impl<T> Send for CudaSlice<T> {}
@@ -854,6 +857,9 @@ unsafe impl<T> Sync for CudaSlice<T> {}
 
 impl<T> Drop for CudaSlice<T> {
     fn drop(&mut self) {
+        if self.non_owning {
+            return;
+        }
         let ctx = &self.stream.ctx;
         if ctx.is_managing_stream_synchronization() {
             if let Some(read) = self.read.as_ref() {
@@ -1614,6 +1620,7 @@ impl CudaStream {
             write: None,
             stream: self.clone(),
             marker: PhantomData,
+            non_owning: false,
         })
     }
 
@@ -1645,6 +1652,7 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            non_owning: false,
         })
     }
 
@@ -2616,6 +2624,7 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            non_owning: false,
         }
     }
 }
