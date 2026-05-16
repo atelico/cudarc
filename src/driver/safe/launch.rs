@@ -267,13 +267,16 @@ impl LaunchArgs<'_> {
         // before launching with cfg.shared_mem_bytes > some device default,
         // and on Blackwell cooperative launches the absence of this call
         // causes CUDA_ERROR_INVALID_ADDRESS_SPACE for extern __shared__
-        // kernels even when the access is dead. Calling it with 0 is a no-op
-        // so we always invoke it.
-        result::function::set_function_attribute(
-            self.func.cu_function,
-            crate::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-            cfg.shared_mem_bytes as i32,
-        )?;
+        // kernels even when the access is dead. Skip when shared_mem_bytes==0
+        // because the per-launch attribute call is non-trivial (~µs) and
+        // the default state already permits zero dynamic shmem.
+        if cfg.shared_mem_bytes > 0 {
+            result::function::set_function_attribute(
+                self.func.cu_function,
+                crate::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                cfg.shared_mem_bytes as i32,
+            )?;
+        }
         let start_event = self
             .flags
             .map(|flags| self.stream.record_event(Some(flags)))
