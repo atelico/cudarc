@@ -75,6 +75,24 @@ impl Workspace {
             size: workspace_size,
         })
     }
+
+    /// Returns a shared reference to the underlying workspace buffer.
+    ///
+    /// Useful for callers that need to pass the workspace pointer directly
+    /// into a `cublasLtMatmul` call (or any other API expecting a device
+    /// pointer + size pair) and want to reuse the buffer across calls
+    /// instead of allocating per-call.
+    pub fn buffer(&self) -> &CudaSlice<u8> {
+        &self.buffer
+    }
+
+    /// Returns the workspace buffer size in bytes.
+    ///
+    /// Matches the `workspaceSizeInBytes` argument that `cublasLtMatmul`
+    /// and friends expect alongside the workspace pointer.
+    pub fn size(&self) -> usize {
+        self.size
+    }
 }
 
 /// Available activation for kernel fusing in matmul
