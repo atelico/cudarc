@@ -275,6 +275,23 @@ impl CudaContext {
         self.has_async_alloc
     }
 
+    /// Whether this device is an integrated GPU (`CU_DEVICE_ATTRIBUTE_INTEGRATED`),
+    /// i.e. shares system DRAM with the CPU (Tegra/Jetson, some laptop iGPUs).
+    ///
+    /// Integrated devices' stream-ordered memory pool can have a reservation
+    /// ceiling well below physical memory; callers may use [`CudaStream::alloc_sync`]
+    /// as a fallback for large allocations there. Queried on demand (not hot path).
+    pub fn integrated(&self) -> bool {
+        unsafe {
+            result::device::get_attribute(
+                self.cu_device,
+                sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_INTEGRATED,
+            )
+        }
+        .map(|v| v > 0)
+        .unwrap_or(false)
+    }
+
     /// The number of devices available.
     pub fn device_count() -> Result<i32, DriverError> {
         result::init()?;
@@ -798,6 +815,11 @@ pub struct CudaSlice<T> {
     /// When true, drop does NOT free the underlying device memory.
     /// Used for sub-slices of arena-allocated buffers.
     pub non_owning: bool,
+    /// When true, this buffer was allocated with synchronous `cuMemAlloc`
+    /// (not the stream-ordered pool) and MUST be freed with `cuMemFree`,
+    /// regardless of whether the context otherwise uses async allocation.
+    /// Set by [`CudaStream::alloc_sync`]; see it for why this exists.
+    pub sync_owned: bool,
 }
 
 unsafe impl<T> Send for CudaSlice<T> {}
@@ -815,7 +837,13 @@ impl<T> Drop for CudaSlice<T> {
         if let Some(write) = self.write.as_ref() {
             ctx.record_err(self.stream.wait(write));
         }
-        if ctx.has_async_alloc {
+        if self.sync_owned {
+            // Allocated via synchronous cuMemAlloc (bypassing the pool), so it
+            // must be freed synchronously. Sync the stream first so any queued
+            // work referencing this buffer completes before the free.
+            ctx.record_err(self.stream.synchronize());
+            ctx.record_err(unsafe { result::free_sync(self.cu_device_ptr) });
+        } else if ctx.has_async_alloc {
             ctx.record_err(unsafe {
                 result::free_async(self.cu_device_ptr, self.stream.cu_stream)
             });
@@ -1489,6 +1517,7 @@ impl CudaStream {
             stream: self.clone(),
             marker: PhantomData,
             non_owning: false,
+            sync_owned: false,
         })
     }
 
@@ -1500,10 +1529,23 @@ impl CudaStream {
         len: usize,
     ) -> Result<CudaSlice<T>, DriverError> {
         self.ctx.bind_to_thread()?;
-        let cu_device_ptr = if self.ctx.has_async_alloc {
-            result::malloc_async(self.cu_stream, len * std::mem::size_of::<T>())?
+        let bytesize = len * std::mem::size_of::<T>();
+        // (cu_device_ptr, sync_owned). On integrated/Tegra GPUs the device's
+        // default stream-ordered pool has a hard reservation ceiling far below
+        // physical memory (measured ~40 GiB on a 122 GiB Jetson Thor): once it
+        // is full, cuMemAllocAsync returns OUT_OF_MEMORY with tens of GB still
+        // free. Synchronous cuMemAlloc is bounded only by physical memory, so
+        // on such devices we fall back to it. Auto-detected; only on the OOM
+        // path, so no cost to normal allocation. sync_owned buffers are freed
+        // with cuMemFree on drop (see Drop for CudaSlice).
+        let (cu_device_ptr, sync_owned) = if self.ctx.has_async_alloc {
+            match result::malloc_async(self.cu_stream, bytesize) {
+                Ok(ptr) => (ptr, false),
+                Err(_) if self.ctx.integrated() => (result::malloc_sync(bytesize)?, true),
+                Err(e) => return Err(e),
+            }
         } else {
-            result::malloc_sync(len * std::mem::size_of::<T>())?
+            (result::malloc_sync(bytesize)?, false)
         };
         let (read, write) = if self.ctx.is_event_tracking() {
             (
@@ -1521,6 +1563,47 @@ impl CudaStream {
             stream: self.clone(),
             marker: PhantomData,
             non_owning: false,
+            sync_owned,
+        })
+    }
+
+    /// Allocates `len` elements of `T` via **synchronous** `cuMemAlloc`,
+    /// bypassing the stream-ordered memory pool, and freed with `cuMemFree`
+    /// on drop (`sync_owned`).
+    ///
+    /// Why this exists: on integrated/Tegra GPUs (e.g. Jetson) the device's
+    /// default stream-ordered pool has a hard reservation ceiling far below
+    /// physical memory (measured ~40 GiB on a 122 GiB Jetson Thor). Once the
+    /// pool is full, `cuMemAllocAsync` returns `OUT_OF_MEMORY` even with tens
+    /// of GB physically free, and synchronizing/retrying the pool does not
+    /// help. A direct `cuMemAlloc` is bounded only by physical memory, so
+    /// large (weight-sized) allocations can use this as a fallback.
+    ///
+    /// # Safety
+    /// The memory is uninitialized, which may be invalid for `T`.
+    pub unsafe fn alloc_sync<T: DeviceRepr>(
+        self: &Arc<Self>,
+        len: usize,
+    ) -> Result<CudaSlice<T>, DriverError> {
+        self.ctx.bind_to_thread()?;
+        let cu_device_ptr = result::malloc_sync(len * std::mem::size_of::<T>())?;
+        let (read, write) = if self.ctx.is_event_tracking() {
+            (
+                Some(self.ctx.new_event(None)?),
+                Some(self.ctx.new_event(None)?),
+            )
+        } else {
+            (None, None)
+        };
+        Ok(CudaSlice {
+            cu_device_ptr,
+            len,
+            read,
+            write,
+            stream: self.clone(),
+            marker: PhantomData,
+            non_owning: false,
+            sync_owned: true,
         })
     }
 
@@ -2446,6 +2529,7 @@ impl CudaStream {
             stream: self.clone(),
             marker: PhantomData,
             non_owning: false,
+            sync_owned: false,
         }
     }
 }
