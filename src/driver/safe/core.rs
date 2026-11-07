@@ -2220,6 +2220,9 @@ pub struct CudaFunction {
     pub(crate) cu_function: sys::CUfunction,
     #[allow(unused)]
     pub(crate) module: Arc<CudaModule>,
+    /// Launch through [crate::driver::LaunchArgs::launch_programmatic] from
+    /// [crate::driver::LaunchArgs::launch] (see [CudaFunction::with_programmatic_launch]).
+    pub(crate) programmatic: bool,
 }
 
 unsafe impl Send for CudaFunction {}
@@ -2233,6 +2236,7 @@ impl CudaModule {
         Ok(CudaFunction {
             cu_function,
             module: self.clone(),
+            programmatic: false,
         })
     }
 
@@ -2270,6 +2274,24 @@ impl CudaModule {
 }
 
 impl CudaFunction {
+    /// This function with every [crate::driver::LaunchArgs::launch] of it made a
+    /// programmatic dependent launch ([crate::driver::LaunchArgs::launch_programmatic])
+    /// when `on`. Only set it for a kernel that executes `griddepcontrol.wait`
+    /// before reading anything the previous kernel in the stream writes.
+    ///
+    /// ```ignore
+    /// let func = module.load_function("my_kernel")?.with_programmatic_launch(true);
+    /// ```
+    pub fn with_programmatic_launch(mut self, on: bool) -> Self {
+        self.programmatic = on;
+        self
+    }
+
+    /// Whether launches of this function are programmatic dependent launches.
+    pub fn is_programmatic_launch(&self) -> bool {
+        self.programmatic
+    }
+
     pub fn occupancy_available_dynamic_smem_per_block(
         &self,
         num_blocks: u32,

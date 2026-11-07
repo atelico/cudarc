@@ -223,6 +223,15 @@ impl LaunchArgs<'_> {
         &mut self,
         cfg: LaunchConfig,
     ) -> Result<Option<(CudaEvent, CudaEvent)>, DriverError> {
+        #[cfg(not(any(
+            feature = "cuda-11040",
+            feature = "cuda-11050",
+            feature = "cuda-11060",
+            feature = "cuda-11070"
+        )))]
+        if self.func.programmatic {
+            return self.launch_programmatic(cfg);
+        }
         self.stream.ctx.bind_to_thread()?;
         for &event in self.waits.iter() {
             self.stream.wait(event)?;
@@ -232,6 +241,53 @@ impl LaunchArgs<'_> {
             .map(|flags| self.stream.record_event(Some(flags)))
             .transpose()?;
         result::launch_kernel(
+            self.func.cu_function,
+            cfg.grid_dim,
+            cfg.block_dim,
+            cfg.shared_mem_bytes,
+            self.stream.cu_stream,
+            &mut self.args,
+        )?;
+        let end_event = self
+            .flags
+            .map(|flags| self.stream.record_event(Some(flags)))
+            .transpose()?;
+        for &event in self.records.iter() {
+            event.record(self.stream)?;
+        }
+        Ok(start_event.zip(end_event))
+    }
+
+    /// Launch with programmatic dependent launch allowed: on compute
+    /// capability 9.0+ the kernel may start while the previous kernel in the
+    /// stream is still running, overlapping its launch and prologue with that
+    /// kernel's tail (the edge is kept when the stream is captured into a
+    /// graph). Older devices run it as an ordinary launch.
+    ///
+    /// # Safety
+    /// See [LaunchArgs::launch()]. In addition the kernel must execute
+    /// `griddepcontrol.wait` (`cudaGridDependencySynchronize()`) before it reads
+    /// memory the previous kernel writes, or it races with that kernel.
+    #[cfg(not(any(
+        feature = "cuda-11040",
+        feature = "cuda-11050",
+        feature = "cuda-11060",
+        feature = "cuda-11070"
+    )))]
+    #[inline(always)]
+    pub unsafe fn launch_programmatic(
+        &mut self,
+        cfg: LaunchConfig,
+    ) -> Result<Option<(CudaEvent, CudaEvent)>, DriverError> {
+        self.stream.ctx.bind_to_thread()?;
+        for &event in self.waits.iter() {
+            self.stream.wait(event)?;
+        }
+        let start_event = self
+            .flags
+            .map(|flags| self.stream.record_event(Some(flags)))
+            .transpose()?;
+        result::launch_kernel_programmatic(
             self.func.cu_function,
             cfg.grid_dim,
             cfg.block_dim,

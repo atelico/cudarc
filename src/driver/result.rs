@@ -1367,6 +1367,49 @@ pub unsafe fn launch_cooperative_kernel(
     .result()
 }
 
+/// Launches `f` with programmatic dependent launch allowed
+/// (`CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION`): the kernel may
+/// begin while the previous kernel in `stream` is still finishing, and must
+/// call `griddepcontrol.wait` (`cudaGridDependencySynchronize`) before it
+/// reads anything that kernel writes. Takes effect on compute capability 9.0+;
+/// older devices run it as an ordinary launch.
+///
+/// # Safety
+/// As [launch_kernel], and the kernel must wait on its grid dependency
+/// before consuming the previous kernel's output.
+#[cfg(not(any(
+    feature = "cuda-11040",
+    feature = "cuda-11050",
+    feature = "cuda-11060",
+    feature = "cuda-11070"
+)))]
+pub unsafe fn launch_kernel_programmatic(
+    f: sys::CUfunction,
+    grid_dim: (c_uint, c_uint, c_uint),
+    block_dim: (c_uint, c_uint, c_uint),
+    shared_mem_bytes: c_uint,
+    stream: sys::CUstream,
+    kernel_params: &mut [*mut c_void],
+) -> Result<(), DriverError> {
+    // Zero-initialised, then filled: the attribute value is a C union and the
+    // structs carry version-dependent padding fields.
+    let mut attr: sys::CUlaunchAttribute = std::mem::zeroed();
+    attr.id = sys::CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+    attr.value.programmaticStreamSerializationAllowed = 1;
+    let mut config: sys::CUlaunchConfig = std::mem::zeroed();
+    config.gridDimX = grid_dim.0;
+    config.gridDimY = grid_dim.1;
+    config.gridDimZ = grid_dim.2;
+    config.blockDimX = block_dim.0;
+    config.blockDimY = block_dim.1;
+    config.blockDimZ = block_dim.2;
+    config.sharedMemBytes = shared_mem_bytes;
+    config.hStream = stream;
+    config.attrs = &mut attr;
+    config.numAttrs = 1;
+    sys::cuLaunchKernelEx(&config, f, kernel_params.as_mut_ptr(), std::ptr::null_mut()).result()
+}
+
 pub mod external_memory {
     use std::mem::MaybeUninit;
 
