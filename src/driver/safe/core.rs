@@ -40,6 +40,8 @@ pub struct CudaContext {
     pub(crate) num_streams: AtomicUsize,
     pub(crate) event_tracking: AtomicBool,
     pub(crate) error_state: AtomicU32,
+    #[cfg(feature = "allocation-census")]
+    device_allocations: AtomicUsize,
 }
 
 unsafe impl Send for CudaContext {}
@@ -69,6 +71,22 @@ impl PartialEq for CudaContext {
 }
 impl Eq for CudaContext {}
 
+#[cfg(feature = "allocation-census")]
+impl CudaContext {
+    /// Successful positive-size device allocations submitted through this
+    /// wrapper and its streams. Arena slices and raw driver calls are outside
+    /// this counter. Cloning a buffer through the safe API counts as allocation.
+    pub fn device_allocations(&self) -> usize {
+        self.device_allocations.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_device_allocation(&self, bytes: usize) {
+        if bytes != 0 {
+            self.device_allocations.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 impl CudaContext {
     /// Creates a new context on the specified device ordinal.
     pub fn new(ordinal: usize) -> Result<Arc<Self>, DriverError> {
@@ -91,6 +109,8 @@ impl CudaContext {
             num_streams: AtomicUsize::new(0),
             event_tracking: AtomicBool::new(true),
             error_state: AtomicU32::new(0),
+            #[cfg(feature = "allocation-census")]
+            device_allocations: AtomicUsize::new(0),
         });
         ctx.bind_to_thread()?;
         Ok(ctx)
@@ -163,6 +183,8 @@ impl CudaContext {
             num_streams: AtomicUsize::new(0),
             event_tracking: AtomicBool::new(true),
             error_state: AtomicU32::new(0),
+            #[cfg(feature = "allocation-census")]
+            device_allocations: AtomicUsize::new(0),
         });
         ctx.bind_to_thread()?;
         Ok(ctx)
@@ -214,6 +236,8 @@ impl CudaContext {
             num_streams: AtomicUsize::new(0),
             event_tracking: AtomicBool::new(true),
             error_state: AtomicU32::new(0),
+            #[cfg(feature = "allocation-census")]
+            device_allocations: AtomicUsize::new(0),
         });
         ctx.bind_to_thread()?;
         Ok(ctx)
@@ -251,6 +275,8 @@ impl CudaContext {
             num_streams: AtomicUsize::new(0),
             event_tracking: AtomicBool::new(true),
             error_state: AtomicU32::new(0),
+            #[cfg(feature = "allocation-census")]
+            device_allocations: AtomicUsize::new(0),
         });
         ctx.bind_to_thread()?;
         Ok(ctx)
@@ -1679,6 +1705,8 @@ impl CudaStream {
         } else {
             (result::malloc_sync(bytesize)?, false)
         };
+        #[cfg(feature = "allocation-census")]
+        self.ctx.record_device_allocation(bytesize);
         let (read, write) = if self.ctx.is_event_tracking() {
             (
                 Some(self.ctx.new_event(None)?),
@@ -1718,7 +1746,10 @@ impl CudaStream {
         len: usize,
     ) -> Result<CudaSlice<T>, DriverError> {
         self.ctx.bind_to_thread()?;
-        let cu_device_ptr = result::malloc_sync(len * std::mem::size_of::<T>())?;
+        let bytes = len * std::mem::size_of::<T>();
+        let cu_device_ptr = result::malloc_sync(bytes)?;
+        #[cfg(feature = "allocation-census")]
+        self.ctx.record_device_allocation(bytes);
         let (read, write) = if self.ctx.is_event_tracking() {
             (
                 Some(self.ctx.new_event(None)?),

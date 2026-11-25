@@ -107,7 +107,10 @@ impl CudaContext {
             sys::CUmemAttach_flags::CU_MEM_ATTACH_HOST
         };
 
-        let cu_device_ptr = result::malloc_managed(len * std::mem::size_of::<T>(), attach_mode)?;
+        let bytes = len * std::mem::size_of::<T>();
+        let cu_device_ptr = result::malloc_managed(bytes, attach_mode)?;
+        #[cfg(feature = "allocation-census")]
+        self.record_device_allocation(bytes);
         let concurrent_managed_access = self
             .attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS)?
             != 0;
