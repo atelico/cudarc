@@ -80,6 +80,7 @@ dynamic-linking = []
 static-linking = []
 
 driver = []
+allocation-census = ["driver"]
 nvrtc = []
 cublas = ["driver"]
 cublaslt = ["driver"]
